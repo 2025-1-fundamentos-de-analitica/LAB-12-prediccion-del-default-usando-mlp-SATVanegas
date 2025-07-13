@@ -97,158 +97,167 @@
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
 
-
-import gzip
-import json
-import os
 import pickle
-import zipfile
-from glob import glob
+import gzip
+import os
+import json
 
 import pandas as pd
-from sklearn.compose import ColumnTransformer
+import numpy as np
+
+from sklearn.discriminant_analysis import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, OneHotEncoder
 from sklearn.decomposition import PCA
 from sklearn.feature_selection import SelectKBest, f_classif
-from sklearn.metrics import (
-    balanced_accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-)
-from sklearn.model_selection import GridSearchCV
 from sklearn.neural_network import MLPClassifier
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.metrics import (
+    precision_score, recall_score, f1_score,
+    balanced_accuracy_score, confusion_matrix
+)
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
 
-def outputCreation(dic):
 
-        if os.path.exists(dic):
-            for file in glob(f"{dic}/*"):
-                os.remove(file)
-            os.rmdir(dic)
-        os.makedirs(dic)
+# Paso 1: Cargar y limpiar datos
+def preparar_datos(df):
+    df = df.copy()
+    df.drop(columns='ID', inplace=True)
+    df.rename(columns={'default payment next month': 'default'}, inplace=True)
+    df.dropna(inplace=True)
+    df = df[(df['EDUCATION'] != 0) & (df['MARRIAGE'] != 0)]
+    df.loc[df['EDUCATION'] > 4, 'EDUCATION'] = 4
+    return df
 
-def save_model(path, estimator):
 
-        outputCreation("files/models/")
-        with gzip.open(path, "wb") as f:
-            pickle.dump(estimator, f)
+# Paso 2: Dividir los datos
+def dividir_datos(train_df,test_df):
+        X_train = train_df.drop(columns="default")
+        y_train = train_df["default"]
+        X_test = test_df.drop(columns="default")
+        y_test = test_df["default"]
+        return X_train, y_train, X_test, y_test
 
-def pregunta01():
 
-    def loadData(dicinp):
+# Paso 3: Crear pipeline
+def crear_pipeline():
 
-        dfs = []
-        paths = glob(f"{dicinp}/*")
-        for path in paths:
-            with zipfile.ZipFile(f"{path}", mode="r") as zf:
-                for fn in zf.namelist():
-                    with zf.open(fn) as f:
-                        dfs.append(pd.read_csv(f, sep=",", index_col=0))
-        return dfs
-    
-    def cleanse(df):
+    # Variables categóricas y numéricas
+    categoricas = ['SEX', 'EDUCATION', 'MARRIAGE']
+    numericas = [
+        "LIMIT_BAL", "AGE", "PAY_0", "PAY_2", "PAY_3", "PAY_4",
+        "PAY_5", "PAY_6", "BILL_AMT1", "BILL_AMT2", "BILL_AMT3",
+        "BILL_AMT4", "BILL_AMT5", "BILL_AMT6", "PAY_AMT1", "PAY_AMT2",
+        "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"
+    ]
 
-        df = df.copy()
-        df = df.rename(columns={"default payment next month": "default"})
-        df = df.loc[df["MARRIAGE"] != 0]
-        df = df.loc[df["EDUCATION"] != 0]
-        df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x >= 4 else x)
-        return df.dropna()
-        
-    test_df, train_df = [cleanse(df) for df  in loadData("files/input")]
+    # Preprocesador: one-hot para categóricas, escalado estándar para numéricas
+    preprocessor = ColumnTransformer([
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categoricas),
+        ("num", StandardScaler(), numericas),
+    ])
 
-    x_train, y_train = train_df.drop(columns=["default"]), train_df["default"]
-    x_test, y_test = test_df.drop(columns=["default"]), test_df["default"]
+    # Pipeline completo
+    pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ("feature_selection", SelectKBest(score_func=f_classif)),
+        ("pca", PCA()),
+        ("classifier", MLPClassifier(max_iter=15000, random_state=17)),
+    ])
+    return pipeline
 
-    def f_pipeline(x_train):
 
-        fct = ["SEX", "EDUCATION", "MARRIAGE"]
-        fnm = [col for col in x_train.columns if col not in fct]
-
-        pathcessor = ColumnTransformer(
-            [
-                ("cat", OneHotEncoder(), fct),
-                ("scaler", StandardScaler(), fnm),
-            ],
-        )
-        return Pipeline(
-            [
-                ("preprocessor", pathcessor),
-                ("feature_selection", SelectKBest(score_func=f_classif)),
-                ("pca", PCA()),
-                ("classifier", MLPClassifier(max_iter=15000, random_state=21)),
-            ]
-        )
-
-    pipeline = f_pipeline(x_train)
-
-    def optimizar_hiperparametros(pipeline):
-
-        gp = {
-            "pca__n_components": [None],
-            "feature_selection__k": [20],
-            "classifier__hidden_layer_sizes": [(50, 30, 40, 60)],
-            "classifier__alpha": [0.26],
-            "classifier__learning_rate_init": [0.001],
-        }
-
-        return GridSearchCV(
-            pipeline,
-            gp,
-            cv=10,
-            n_jobs=-1,
-            verbose=2,
-            refit=True,
-        )
-
-    estimator = optimizar_hiperparametros(pipeline)
-    estimator.fit(x_train, y_train)
-
-    save_model(
-        os.path.join("files/models/", "model.pkl.gz"),
-        estimator,
+# Paso 4: Optimización de hiperparámetros
+def optimizar_hyperparametros(pipeline):
+    param_grid = {
+        'pca__n_components': [None],
+        'feature_selection__k': [20],
+        'classifier__hidden_layer_sizes': [(50, 30, 40, 60)],
+        'classifier__alpha': [0.26],
+        'classifier__learning_rate_init': [0.001],
+    }
+    grid_search = GridSearchCV( estimator=pipeline,
+        param_grid=param_grid,
+        cv=10,
+        scoring='balanced_accuracy',
+        n_jobs=-1,
+        verbose=2
     )
+    return grid_search
 
-    
-    outputCreation("files/output/metrics/")
 
-    def calc_metrics(dataset_type, y_true, y_pred):
-        """Calculate metrics"""
-        return {
-            "type": "metrics",
-            "dataset": dataset_type,
-            "precision": precision_score(y_true, y_pred, zero_division=0),
-            "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
-            "recall": recall_score(y_true, y_pred, zero_division=0),
-            "f1_score": f1_score(y_true, y_pred, zero_division=0),
-        }
+# Paso 5: Calcular métricas
+def calcular_metricas(modelo, x, y, dataset_name):
+    y_pred = modelo.predict(x)
+    metricas = {
+        "type": "metrics",
+        "dataset": dataset_name,
+        "precision": round(precision_score(y, y_pred), 4),
+        "balanced_accuracy": round(balanced_accuracy_score(y, y_pred), 4),
+        "recall": round(recall_score(y, y_pred), 4),
+        "f1_score": round(f1_score(y, y_pred), 4)
+    }
+    return y_pred, metricas
 
-    y_test_pred = estimator.predict(x_test)
-    test_precision_metrics = calc_metrics("test", y_test, y_test_pred)
-    y_train_pred = estimator.predict(x_train)
-    train_precision_metrics = calc_metrics("train", y_train, y_train_pred)
 
-    def matrix_calc(dataset_type, y_true, y_pred):
-        """Confusion matrix"""
-        cm = confusion_matrix(y_true, y_pred)
-        return {
-            "type": "cm_matrix",
-            "dataset": dataset_type,
-            "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
-            "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])},
-        }
-    
-    test_confusion_metrics = matrix_calc("test", y_test, y_test_pred)
-    train_confusion_metrics = matrix_calc("train", y_train, y_train_pred)
+# Paso 6: Matriz de confusión
+def calcular_matriz_confusion(x, y, dataset_name):
+    cm = confusion_matrix(x, y)
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_name,
+        "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+        "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])}
+    }
 
-    with open("files/output/metrics.json", "w", encoding="utf-8") as file:
-        file.write(json.dumps(train_precision_metrics) + "\n")
-        file.write(json.dumps(test_precision_metrics) + "\n")
-        file.write(json.dumps(train_confusion_metrics) + "\n")
-        file.write(json.dumps(test_confusion_metrics) + "\n")
+
+# Paso 7: Guardar el modelo
+def guardar_comprimido(modelo, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with gzip.open(path, 'wb') as f:
+        pickle.dump(modelo, f)
+
+
+# Paso 8: Guardar métricas
+def guardar_jsonl(registros, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        for item in registros:
+            f.write(json.dumps(item) + '\n')
+
 
 
 if __name__ == "__main__":
-    pregunta01()
+    print("Cargando datos...")
+    train_df = pd.read_csv("files/input/train_data.csv.zip")
+    test_df = pd.read_csv("files/input/test_data.csv.zip")
+
+    print("Limpiando...")
+    train_df = preparar_datos(train_df)
+    test_df = preparar_datos(test_df)
+
+    X_train, y_train, X_test, y_test = dividir_datos(train_df, test_df)
+
+    print("Creando pipeline...")
+    pipeline = crear_pipeline()
+
+    print("Ajustando modelo ...")
+    modelo_ajustado = optimizar_hyperparametros(pipeline)
+    model = modelo_ajustado.fit(X_train,y_train)
+
+    print("Guardando modelo...")
+    guardar_comprimido(modelo_ajustado, 'files/models/model.pkl.gz')
+
+    print("Calculando metricas...")
+    y_pred_train, metricas_entrenadas = calcular_metricas(model, X_train, y_train, "train")
+    y_pred_test, metricas_test = calcular_metricas(model, X_test, y_test, "test")
+
+    cm_train = calcular_matriz_confusion(y_train,y_pred_train, 'train')
+    cm_test = calcular_matriz_confusion(y_test, y_pred_test, 'test')
+
+    guardar_jsonl(
+        [metricas_entrenadas, metricas_test, cm_train, cm_test],
+        'files/output/metrics.json'
+    )
+
+    print("Completado")
